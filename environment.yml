@@ -1,0 +1,17 @@
+name: ssd_env
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.8
+  - pytorch=2.4.0
+  - torchvision=0.19.0
+  - cudatoolkit=12.1
+  - pip
+  - pip:
+    - PyYAML==5.4.1
+    - easydict==1.9
+    - numpy==1.24.3
+    - Pillow==10.0.0
+
