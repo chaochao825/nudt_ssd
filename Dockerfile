@@ -14,6 +14,10 @@ RUN pip install --no-cache-dir torch==2.4.0 torchvision==0.19.0 --index-url http
 # Copy project files
 COPY . ./
 
+# Copy pretrained model weights (must be in the build context)
+# This assumes ssd_weights.pth is in the project directory
+COPY ssd_weights.pth /project/ssd_weights.pth
+
 # Create necessary directories
 RUN mkdir -p /project/input /project/output /project/cfgs
 

@@ -121,3 +121,46 @@ def sse_clean_samples_gen_validated(clean_image_name):
     }
     sse_print(event, data)
 
+
+def sse_epoch_progress(progress, total, epoch_type="Epoch"):
+    """
+    Output SSE format for epoch progress
+    :param progress: Current epoch number
+    :param total: Total epochs
+    :param epoch_type: Type of progress (default: "Epoch")
+    """
+    event = "training_progress"
+    data = {
+        "progress": progress,
+        "total": total,
+        "type": epoch_type
+    }
+    sse_print(event, data)
+
+
+def sse_error(message, event_name="error"):
+    """
+    Output SSE format for error messages
+    :param message: Error message
+    :param event_name: Event name (default: "error")
+    """
+    data = {
+        "status": "failure",
+        "message": message
+    }
+    sse_print(event_name, data)
+
+
+def sse_class_number_validation(expected, got):
+    """
+    Output SSE format for CLASS_NUMBER mismatch error
+    :param expected: Expected class number
+    :param got: Got class number
+    """
+    event = "class_number_validated"
+    data = {
+        "status": "failure",
+        "message": f"expect CLASS_NUMBER {expected} but got {got}"
+    }
+    sse_print(event, data)
+
