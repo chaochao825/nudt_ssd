@@ -29,5 +29,5 @@ vehicle/input/weights/
 *.tar
 *.tar.gz
 *.tgz
-# *.pth
+*.pth
 *.weights
