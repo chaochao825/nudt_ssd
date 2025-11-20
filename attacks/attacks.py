@@ -11,8 +11,13 @@ from pathlib import Path
 import glob
 import warnings
 import sys
+import json
 
-from utils.sse import sse_adv_samples_gen_validated, sse_class_number_validation
+# Suppress all warnings
+warnings.filterwarnings('ignore')
+os.environ['PYTHONWARNINGS'] = 'ignore'
+
+from utils.sse import sse_adv_samples_gen_validated, sse_class_number_validation, sse_final_result
 
 
 class SSDDataset(Dataset):
@@ -157,6 +162,7 @@ class SSDAttacks:
         os.makedirs(f'{self.cfg.save_dir}/adv_images', exist_ok=True)
         dataloader = self.get_dataloader()
         
+        total_images = 0
         for batch_i, batch in enumerate(dataloader):
             batch = self.preprocess(batch)
             
@@ -181,14 +187,35 @@ class SSDAttacks:
             adv_image_name = f'{self.cfg.save_dir}/adv_images/adv_image_{batch_i}.jpg'
             pil_image.save(adv_image_name)
             sse_adv_samples_gen_validated(adv_image_name)
+            total_images += 1
+        
+        # Output final result
+        final_results = {
+            "status": "success",
+            "total_adversarial_samples": total_images,
+            "attack_method": args.attack_method,
+            "epsilon": float(args.epsilon),
+            "output_path": f'{self.cfg.save_dir}/adv_images'
+        }
+        sse_final_result(final_results)
     
     def run_attack(self, args):
         """Evaluate model robustness"""
+        # Create output directories
+        os.makedirs(f'{self.cfg.save_dir}/attack_results', exist_ok=True)
+        os.makedirs(f'{self.cfg.save_dir}/adversarial_images', exist_ok=True)
+        
         dataloader = self.get_dataloader()
         total = 0
         successful_attacks = 0
+        total_clean_detections = 0
+        total_adv_detections = 0
+        clean_confidence_sum = 0.0
+        adv_confidence_sum = 0.0
         
-        for batch in dataloader:
+        results_log = []
+        
+        for batch_i, batch in enumerate(dataloader):
             batch = self.preprocess(batch)
             
             # Get clean predictions
@@ -202,13 +229,80 @@ class SSDAttacks:
                 adv_images = self.pgd(batch['img'], eps=args.epsilon, alpha=args.step_size,
                                      steps=args.max_iterations, random_start=args.random_start)
             
+            # Save adversarial images
+            for i in range(adv_images.shape[0]):
+                to_pil = transforms.ToPILImage()
+                pil_image = to_pil(adv_images[i].cpu())
+                adv_image_path = f'{self.cfg.save_dir}/adversarial_images/adv_{batch_i}_{i}.jpg'
+                pil_image.save(adv_image_path)
+            
             # Get adversarial predictions
             with torch.no_grad():
                 adv_outputs = self.model(adv_images)
             
+            # Calculate metrics
+            for clean_out, adv_out in zip(clean_outputs, adv_outputs):
+                num_clean_det = len(clean_out['boxes'])
+                num_adv_det = len(adv_out['boxes'])
+                
+                total_clean_detections += num_clean_det
+                total_adv_detections += num_adv_det
+                
+                if num_clean_det > 0:
+                    clean_confidence_sum += clean_out['scores'].mean().item()
+                if num_adv_det > 0:
+                    adv_confidence_sum += adv_out['scores'].mean().item()
+                
+                # Count as successful attack if detections dropped
+                if num_adv_det < num_clean_det:
+                    successful_attacks += 1
+                
+                results_log.append({
+                    'image_idx': total,
+                    'clean_detections': num_clean_det,
+                    'adv_detections': num_adv_det,
+                    'attack_success': num_adv_det < num_clean_det
+                })
+            
             total += batch['img'].size(0)
         
-        print(f"Attack evaluation completed. Total samples: {total}")
+        # Calculate final metrics
+        attack_success_rate = successful_attacks / total if total > 0 else 0
+        avg_clean_confidence = clean_confidence_sum / total if total > 0 else 0
+        avg_adv_confidence = adv_confidence_sum / total if total > 0 else 0
+        detection_drop_rate = (total_clean_detections - total_adv_detections) / total_clean_detections if total_clean_detections > 0 else 0
+        
+        # Save detailed results
+        results_file = f'{self.cfg.save_dir}/attack_results/evaluation_results.json'
+        with open(results_file, 'w') as f:
+            json.dump(results_log, f, indent=2)
+        
+        # Save summary
+        summary_file = f'{self.cfg.save_dir}/attack_results/summary.txt'
+        with open(summary_file, 'w') as f:
+            f.write(f"Attack Evaluation Summary\n")
+            f.write(f"========================\n")
+            f.write(f"Total samples: {total}\n")
+            f.write(f"Successful attacks: {successful_attacks}\n")
+            f.write(f"Attack success rate: {attack_success_rate:.2%}\n")
+            f.write(f"Detection drop rate: {detection_drop_rate:.2%}\n")
+            f.write(f"Avg clean confidence: {avg_clean_confidence:.4f}\n")
+            f.write(f"Avg adv confidence: {avg_adv_confidence:.4f}\n")
+        
+        # Output final result as SSE
+        final_results = {
+            "status": "success",
+            "total_samples": total,
+            "successful_attacks": successful_attacks,
+            "attack_success_rate": round(attack_success_rate, 4),
+            "detection_drop_rate": round(detection_drop_rate, 4),
+            "avg_clean_confidence": round(avg_clean_confidence, 4),
+            "avg_adv_confidence": round(avg_adv_confidence, 4),
+            "attack_method": args.attack_method,
+            "epsilon": float(args.epsilon),
+            "output_path": self.cfg.save_dir
+        }
+        sse_final_result(final_results)
     
     def fgsm(self, images, eps=8/255):
         """FGSM attack"""

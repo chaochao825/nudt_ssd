@@ -164,3 +164,12 @@ def sse_class_number_validation(expected, got):
     }
     sse_print(event, data)
 
+
+def sse_final_result(results: dict, event_name="final_result"):
+    """
+    Output SSE format for final results
+    :param results: Results dictionary
+    :param event_name: Event name (default: "final_result")
+    """
+    sse_print(event_name, results)
+
