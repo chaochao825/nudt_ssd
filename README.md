@@ -186,13 +186,6 @@ event: adv_samples_gen_validated
 data: {"status": "success", "message": "adv sample is generated.", "file_name": "/project/output/adv_images/adv_image_0_0.jpg"}
 ```
 
-## 系统要求
-- Python 3.8
-- PyTorch 2.4.0
-- torchvision 0.19.0
-- CUDA 12.1 (用于 GPU 支持)
-- 查看 [requirements.txt](requirements.txt) 了解完整列表
-
 ## 测试
 使用提供的测试脚本验证实现：
 ```bash
