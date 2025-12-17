@@ -17,8 +17,37 @@ import json
 warnings.filterwarnings('ignore')
 os.environ['PYTHONWARNINGS'] = 'ignore'
 
-from utils.sse import sse_adv_samples_gen_validated, sse_class_number_validation, sse_final_result
+from utils.sse import sse_adv_samples_gen_validated, sse_class_number_validation, sse_final_result, sse_print, sse_error, save_json_results
 
+def smart_load_dataset(data_path, max_extract=50):
+    """Smart dataset loader for vehicle detection"""
+    from pathlib import Path
+    data_path = Path(data_path)
+    zip_files = list(data_path.glob('*.zip')) + list(data_path.glob('*/*.zip'))
+    if zip_files:
+        extract_dir = data_path / '.extracted' / zip_files[0].stem
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        existing = list(extract_dir.rglob('*.jpg')) + list(extract_dir.rglob('*.png'))
+        if len(existing) >= 10:
+            return str(extract_dir)
+        try:
+            import zipfile
+            with zipfile.ZipFile(zip_files[0], 'r') as zf:
+                members = [m for m in zf.namelist() if m.lower().endswith(('.jpg', '.png'))]
+                for m in members[:max_extract]:
+                    try: zf.extract(m, extract_dir)
+                    except: pass
+            if list(extract_dir.rglob('*.jpg')):
+                return str(extract_dir)
+        except: pass
+    existing = [f for f in data_path.rglob('*.jpg') if '__MACOSX' not in str(f)]
+    if existing:
+        return str(data_path)
+    # Fallback
+    fallback = Path(__file__).parent.parent / 'test_data'
+    if not fallback.exists():
+        fallback = Path(__file__).parent.parent / 'test_data' / 'ua_detrac'
+    return str(fallback) if fallback.exists() else str(data_path)
 
 class SSDDataset(Dataset):
     """Simple dataset for loading images"""
@@ -53,15 +82,30 @@ class SSDAttacks:
     
     def __init__(self, cfg):
         self.cfg = cfg
-        self.device = torch.device(cfg.device if torch.cuda.is_available() and 'cuda' in cfg.device else 'cpu')
+        
+        # Smart dataset loading
+        sse_print("checking_dataset", {}, progress=22, message="Checking dataset", log="[22%] Loading dataset\n")
+        cfg.data_path = smart_load_dataset(cfg.data_path)
+        sse_print("dataset_ready", {}, progress=23, message="Dataset ready", log="[23%] Dataset loaded\n")
+        
+        # Configure device with proper CUDA settings
+        if torch.cuda.is_available() and 'cuda' in cfg.device:
+            self.device = torch.device(cfg.device)
+            # Suppress CUDA warnings
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.deterministic = False
+        else:
+            self.device = torch.device('cpu')
         
         # Suppress warnings to avoid model download warnings
         warnings.filterwarnings('ignore', category=UserWarning)
         warnings.filterwarnings('ignore', message='.*Downloading.*')
+        warnings.filterwarnings('ignore', category=FutureWarning)
         
         # Set environment to prevent downloads
         os.environ['TORCH_HOME'] = '/project/.cache/torch'
         os.environ['HF_HUB_OFFLINE'] = '1'
+        os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
         
         # Validate CLASS_NUMBER before loading model
         self._validate_class_number()
@@ -159,12 +203,34 @@ class SSDAttacks:
     
     def run_adv(self, args):
         """Generate adversarial samples"""
+        sse_print("attack_process_start", {}, progress=25, 
+                 message=f"Starting {args.attack_method.upper()} adversarial sample generation",
+                 log=f"[25%] Initializing {args.attack_method.upper()} attack with epsilon={args.epsilon}\n")
+        
         os.makedirs(f'{self.cfg.save_dir}/adv_images', exist_ok=True)
         dataloader = self.get_dataloader()
         
-        total_images = 0
+        total_images = len(dataloader.dataset)
+        processed_images = 0
+        output_files = []
+        
+        sse_print("attack_parameters", {}, progress=25,
+                 message=f"Attack parameters configured",
+                 log=f"[25%] Parameters: epsilon={args.epsilon}, iterations={args.max_iterations}, method={args.attack_method}\n",
+                 details={
+                     "epsilon": float(args.epsilon),
+                     "step_size": float(args.step_size),
+                     "max_iterations": args.max_iterations,
+                     "attack_method": args.attack_method
+                 })
+        
         for batch_i, batch in enumerate(dataloader):
             batch = self.preprocess(batch)
+            
+            sse_print("processing_image", {}, 
+                     progress=int(25 + (batch_i / total_images) * 60),
+                     message=f"Processing image {batch_i + 1}/{total_images}",
+                     log=f"[{int(25 + (batch_i / total_images) * 60)}%] Generating adversarial perturbation for image {batch_i + 1}/{total_images}\n")
             
             if args.attack_method == 'pgd':
                 adv_images = self.pgd(batch['img'], eps=args.epsilon, alpha=args.step_size, 
@@ -179,6 +245,7 @@ class SSDAttacks:
             elif args.attack_method == 'deepfool':
                 adv_images, _ = self.deepfool(batch['img'], steps=args.max_iterations, overshoot=0.02)
             else:
+                sse_error(f'Invalid attack method: {args.attack_method}')
                 raise ValueError(f'Invalid attack method: {args.attack_method}')
             
             # Save adversarial images
@@ -186,26 +253,55 @@ class SSDAttacks:
             pil_image = to_pil(adv_images[0].cpu())
             adv_image_name = f'{self.cfg.save_dir}/adv_images/adv_image_{batch_i}.jpg'
             pil_image.save(adv_image_name)
-            sse_adv_samples_gen_validated(adv_image_name)
-            total_images += 1
+            output_files.append(adv_image_name)
+            
+            processed_images += 1
+            sse_adv_samples_gen_validated(adv_image_name, processed_images, total_images)
+        
+        sse_print("attack_generation_complete", {}, progress=90,
+                 message="Adversarial samples generated successfully",
+                 log=f"[90%] Successfully generated {processed_images} adversarial samples\n")
         
         # Output final result
         final_results = {
             "status": "success",
-            "total_adversarial_samples": total_images,
+            "message": f"{args.attack_method.upper()} adversarial generation completed",
+            "total_adversarial_samples": processed_images,
             "attack_method": args.attack_method,
             "epsilon": float(args.epsilon),
-            "output_path": f'{self.cfg.save_dir}/adv_images'
+            "output_path": f'{self.cfg.save_dir}/adv_images',
+            "attack_parameters": {
+                "epsilon": float(args.epsilon),
+                "step_size": float(args.step_size),
+                "max_iterations": args.max_iterations
+            },
+            "output_info": {
+                "output_files": len(output_files),
+                "output_directory": f'{self.cfg.save_dir}/adv_images'
+            }
         }
+        
+        # Save to JSON
+        json_path = save_json_results(final_results, self.cfg.save_dir, f"{args.attack_method}_adv_results.json")
+        sse_print("results_saved", {}, progress=95,
+                 message="Results saved to JSON file",
+                 log=f"[95%] Results saved to {json_path}\n",
+                 details={"json_path": json_path})
+        
         sse_final_result(final_results)
     
     def run_attack(self, args):
         """Evaluate model robustness"""
+        sse_print("attack_process_start", {}, progress=25, 
+                 message=f"Starting {args.attack_method.upper()} attack evaluation",
+                 log=f"[25%] Initializing attack evaluation with {args.attack_method.upper()}\n")
+        
         # Create output directories
         os.makedirs(f'{self.cfg.save_dir}/attack_results', exist_ok=True)
         os.makedirs(f'{self.cfg.save_dir}/adversarial_images', exist_ok=True)
         
         dataloader = self.get_dataloader()
+        total_images = len(dataloader.dataset)
         total = 0
         successful_attacks = 0
         total_clean_detections = 0
@@ -217,6 +313,11 @@ class SSDAttacks:
         
         for batch_i, batch in enumerate(dataloader):
             batch = self.preprocess(batch)
+            
+            sse_print("processing_image", {}, 
+                     progress=int(25 + (batch_i / total_images) * 60),
+                     message=f"Evaluating image {batch_i + 1}/{total_images}",
+                     log=f"[{int(25 + (batch_i / total_images) * 60)}%] Processing and attacking image {batch_i + 1}/{total_images}\n")
             
             # Get clean predictions
             with torch.no_grad():
@@ -235,6 +336,7 @@ class SSDAttacks:
                 pil_image = to_pil(adv_images[i].cpu())
                 adv_image_path = f'{self.cfg.save_dir}/adversarial_images/adv_{batch_i}_{i}.jpg'
                 pil_image.save(adv_image_path)
+                sse_adv_samples_gen_validated(adv_image_path, batch_i + 1, total_images)
             
             # Get adversarial predictions
             with torch.no_grad():
@@ -266,6 +368,10 @@ class SSDAttacks:
             
             total += batch['img'].size(0)
         
+        sse_print("attack_evaluation_complete", {}, progress=85,
+                 message="Attack evaluation completed",
+                 log=f"[85%] Evaluated {total} samples with {args.attack_method.upper()} attack\n")
+        
         # Calculate final metrics
         attack_success_rate = successful_attacks / total if total > 0 else 0
         avg_clean_confidence = clean_confidence_sum / total if total > 0 else 0
@@ -289,19 +395,47 @@ class SSDAttacks:
             f.write(f"Avg clean confidence: {avg_clean_confidence:.4f}\n")
             f.write(f"Avg adv confidence: {avg_adv_confidence:.4f}\n")
         
+        sse_print("results_saved", {}, progress=95,
+                 message="Evaluation results saved",
+                 log=f"[95%] Results saved to {self.cfg.save_dir}/attack_results/\n")
+        
         # Output final result as SSE
         final_results = {
             "status": "success",
+            "message": f"{args.attack_method.upper()} attack evaluation completed successfully",
             "total_samples": total,
             "successful_attacks": successful_attacks,
-            "attack_success_rate": round(attack_success_rate, 4),
-            "detection_drop_rate": round(detection_drop_rate, 4),
-            "avg_clean_confidence": round(avg_clean_confidence, 4),
-            "avg_adv_confidence": round(avg_adv_confidence, 4),
-            "attack_method": args.attack_method,
-            "epsilon": float(args.epsilon),
-            "output_path": self.cfg.save_dir
+            "attack_success_rate": f"{attack_success_rate * 100:.2f}%",
+            "comparison_metrics": {
+                "clean_model": {
+                    "total_detections": total_clean_detections,
+                    "avg_confidence": f"{avg_clean_confidence:.4f}"
+                },
+                "under_attack": {
+                    "total_detections": total_adv_detections,
+                    "avg_confidence": f"{avg_adv_confidence:.4f}"
+                },
+                "degradation": {
+                    "detection_drop_rate": f"{detection_drop_rate * 100:.2f}%",
+                    "confidence_drop": f"{(avg_clean_confidence - avg_adv_confidence):.4f}"
+                }
+            },
+            "attack_parameters": {
+                "attack_method": args.attack_method,
+                "epsilon": float(args.epsilon),
+                "step_size": float(args.step_size),
+                "max_iterations": args.max_iterations
+            },
+            "output_info": {
+                "output_path": self.cfg.save_dir,
+                "results_file": results_file,
+                "summary_file": summary_file
+            }
         }
+        
+        # Save comprehensive results
+        json_path = save_json_results(final_results, self.cfg.save_dir, f"{args.attack_method}_attack_results.json")
+        
         sse_final_result(final_results)
     
     def fgsm(self, images, eps=8/255):

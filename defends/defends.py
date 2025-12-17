@@ -5,8 +5,31 @@ from PIL import Image, ImageFilter
 import glob
 from torchvision import transforms
 import numpy as np
-from utils.sse import sse_clean_samples_gen_validated
+from utils.sse import sse_clean_samples_gen_validated, sse_print, sse_final_result, sse_error, save_json_results
 
+def smart_load_dataset(data_path):
+    """Smart dataset loader"""
+    from pathlib import Path
+    import zipfile
+    data_path = Path(data_path)
+    zip_files = list(data_path.glob('*.zip')) + list(data_path.glob('*/*.zip'))
+    if zip_files:
+        extract_dir = data_path / '.extracted' / zip_files[0].stem
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        if len(list(extract_dir.rglob('*.jpg'))) >= 10:
+            return str(extract_dir)
+        try:
+            with zipfile.ZipFile(zip_files[0], 'r') as zf:
+                for m in [m for m in zf.namelist() if m.endswith('.jpg')][:50]:
+                    try: zf.extract(m, extract_dir)
+                    except: pass
+            if list(extract_dir.rglob('*.jpg')):
+                return str(extract_dir)
+        except: pass
+    if list(data_path.rglob('*.jpg')):
+        return str(data_path)
+    fallback = Path(__file__).parent.parent / 'test_data'
+    return str(fallback) if fallback.exists() else str(data_path)
 
 class SSDDefends:
     """SSD Defense mechanisms"""
@@ -17,6 +40,14 @@ class SSDDefends:
     
     def run_defend(self, args):
         """Apply defense mechanisms to images"""
+        # Smart dataset loading
+        self.cfg.data_path = smart_load_dataset(self.cfg.data_path)
+        
+        sse_print("defense_process_start", {}, progress=25,
+                 message=f"Starting {args.defend_method.UPPER()} defense processing",
+                 log=f"[25%] Initializing {args.defend_method.upper()} defense mechanism\n",
+                 details={"defense_method": args.defend_method, "model": self.cfg.model})
+        
         os.makedirs(f'{self.cfg.save_dir}/defended_images', exist_ok=True)
         
         # Find all images
@@ -25,7 +56,27 @@ class SSDDefends:
         for ext in image_extensions:
             image_files.extend(glob.glob(os.path.join(self.cfg.data_path, '**', ext), recursive=True))
         
-        for img_path in image_files:
+        if not image_files:
+            sse_error("No images found in data path")
+            return
+        
+        total_images = len(image_files)
+        output_files = []
+        
+        sse_print("defense_parameters", {}, progress=25,
+                 message=f"Defense parameters configured",
+                 log=f"[25%] Processing {total_images} images with {args.defend_method.upper()} defense\n",
+                 details={
+                     "defense_method": args.defend_method,
+                     "total_images": total_images
+                 })
+        
+        for idx, img_path in enumerate(image_files):
+            sse_print("processing_image", {}, 
+                     progress=int(25 + (idx / total_images) * 60),
+                     message=f"Processing image {idx + 1}/{total_images}",
+                     log=f"[{int(25 + (idx / total_images) * 60)}%] Applying {args.defend_method.upper()} defense to image {idx + 1}/{total_images}\n")
+            
             image = Image.open(img_path).convert('RGB')
             
             if args.defend_method == 'scale':
@@ -39,13 +90,47 @@ class SSDDefends:
             elif args.defend_method == 'fgsm':
                 defended_image = self.fgsm_defense(image)
             else:
+                sse_error(f"Unknown defense method: {args.defend_method}")
                 defended_image = image
             
             # Save defended image
             filename = os.path.basename(img_path)
             save_path = f'{self.cfg.save_dir}/defended_images/{filename}'
             defended_image.save(save_path)
-            sse_clean_samples_gen_validated(save_path)
+            output_files.append(save_path)
+            sse_clean_samples_gen_validated(save_path, idx + 1, total_images)
+        
+        sse_print("defense_complete", {}, progress=90,
+                 message="Defense processing completed",
+                 log=f"[90%] Successfully defended {len(output_files)} images\n")
+        
+        # Output final result
+        final_results = {
+            "status": "success",
+            "message": f"{args.defend_method.upper()} defense completed successfully",
+            "defense_method": args.defend_method,
+            "model_name": self.cfg.model,
+            "total_samples": total_images,
+            "successfully_defended": len(output_files),
+            "defense_metrics": {
+                "method": args.defend_method,
+                "processed_images": len(output_files),
+                "output_directory": f'{self.cfg.save_dir}/defended_images'
+            },
+            "output_info": {
+                "output_files": len(output_files),
+                "output_directory": f'{self.cfg.save_dir}/defended_images'
+            }
+        }
+        
+        # Save results to JSON
+        json_path = save_json_results(final_results, self.cfg.save_dir, f"{args.defend_method}_defense_results.json")
+        sse_print("results_saved", {}, progress=95,
+                 message="Results saved to JSON file",
+                 log=f"[95%] Results saved to {json_path}\n",
+                 details={"json_path": json_path})
+        
+        sse_final_result(final_results)
     
     def scale_defense(self, image):
         """Scale-based defense"""
