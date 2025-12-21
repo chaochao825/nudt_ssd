@@ -19,35 +19,66 @@ os.environ['PYTHONWARNINGS'] = 'ignore'
 
 from utils.sse import sse_adv_samples_gen_validated, sse_class_number_validation, sse_final_result, sse_print, sse_error, save_json_results
 
+
+def detect_vehicle_dataset_type(data_path):
+    """Detect vehicle dataset type"""
+    from pathlib import Path
+    data_path = Path(data_path)
+    if 'detrac' in str(data_path).lower() or list(data_path.glob('*DETRAC*.zip')):
+        return "UA-DETRAC"
+    if 'bdd100k' in str(data_path).lower():
+        return "BDD100K"
+    if 'kitti' in str(data_path).lower():
+        return "KITTI"
+    return "Generic"
+
 def smart_load_dataset(data_path, max_extract=50):
     """Smart dataset loader for vehicle detection"""
     from pathlib import Path
+    import zipfile
     data_path = Path(data_path)
+    
+    # Detect dataset type
+    dataset_type = detect_vehicle_dataset_type(data_path)
+    sse_print("checking_dataset", {}, progress=21, message=f"检测到{dataset_type}数据集", log=f"[21%] 数据集类型: {dataset_type}\n")
+    
+    # Handle ZIP files
     zip_files = list(data_path.glob('*.zip')) + list(data_path.glob('*/*.zip'))
     if zip_files:
-        extract_dir = data_path / '.extracted' / zip_files[0].stem
+        zip_file = zip_files[0]
+        sse_print("compressed_found", {}, progress=22, message=f"发现压缩数据集: {zip_file.name}", log=f"[22%] 检测到压缩文件\n")
+        extract_dir = data_path / '.extracted' / zip_file.stem
         extract_dir.mkdir(parents=True, exist_ok=True)
         existing = list(extract_dir.rglob('*.jpg')) + list(extract_dir.rglob('*.png'))
         if len(existing) >= 10:
+            sse_print("using_cached", {}, progress=23, message=f"使用缓存: {len(existing)}张", log=f"[23%] 缓存\n")
             return str(extract_dir)
         try:
-            import zipfile
-            with zipfile.ZipFile(zip_files[0], 'r') as zf:
+            sse_print("extracting", {}, progress=23, message=f"提取{max_extract}张样本...", log=f"[23%] 提取中\n")
+            with zipfile.ZipFile(zip_file, 'r') as zf:
                 members = [m for m in zf.namelist() if m.lower().endswith(('.jpg', '.png'))]
                 for m in members[:max_extract]:
                     try: zf.extract(m, extract_dir)
                     except: pass
-            if list(extract_dir.rglob('*.jpg')):
+            extracted = list(extract_dir.rglob('*.jpg')) + list(extract_dir.rglob('*.png'))
+            if extracted:
+                sse_print("extraction_success", {}, progress=24, message=f"提取成功: {len(extracted)}张", log=f"[24%] 完成\n")
                 return str(extract_dir)
         except: pass
+    
+    # Check for existing images
     existing = [f for f in data_path.rglob('*.jpg') if '__MACOSX' not in str(f)]
     if existing:
+        sse_print("dataset_ready", {}, progress=24, message=f"数据集就绪: {len(existing)}张", log=f"[24%] 就绪\n")
         return str(data_path)
+    
     # Fallback
     fallback = Path(__file__).parent.parent / 'test_data'
     if not fallback.exists():
         fallback = Path(__file__).parent.parent / 'test_data' / 'ua_detrac'
+    sse_print("using_fallback", {}, progress=24, message="使用测试数据", log="[24%] 回退\n")
     return str(fallback) if fallback.exists() else str(data_path)
+
 
 class SSDDataset(Dataset):
     """Simple dataset for loading images"""
